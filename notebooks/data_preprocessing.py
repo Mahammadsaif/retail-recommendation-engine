@@ -1,78 +1,68 @@
-"""
-Phase 2: Data Preprocessing
-===========================
-
-Goal:
-- Filter cold start users and products
-- Handle missing values in product metadata
-- Prepare datasets for training collaborative and hybrid models
-- Save processed datasets
-"""
-
 import pandas as pd
 import numpy as np
 import os
 import json
+from scipy.sparse import csr_matrix, save_npz
 
-# ==================== 1. LOAD RAW DATA ====================
-print("="*60)
-print("🚀 PHASE 2: DATA PREPROCESSING")
-print("="*60)
+RAW_RATINGS_PATH = "data/raw/ratings_Electronics.csv"
+RAW_PRODUCTS_PATH = "data/raw/Amazon_Electronics.csv"
 
-ratings_df = pd.read_csv('data/raw/ratings_Electronics.csv', 
-                         names=['user_id', 'product_id', 'rating', 'timestamp'])
-ratings_df['datetime'] = pd.to_datetime(ratings_df['timestamp'], unit='s')
+def load_raw_data():
+    ratings = pd.read_csv(RAW_RATINGS_PATH, names=['user_id', 'product_id', 'rating', 'timestamp'])
+    products = pd.read_csv(RAW_PRODUCTS_PATH)
+    ratings['datetime'] = pd.to_datetime(ratings['timestamp'], unit='s')
+    return ratings, products
 
-products_df = pd.read_csv('data/raw/Amazon_Electronics.csv')
+def filter_cold_start(ratings):
+    user_counts = ratings['user_id'].value_counts()
+    product_counts = ratings['product_id'].value_counts()
+    ratings = ratings[ratings['user_id'].isin(user_counts[user_counts >= 5].index)]
+    ratings = ratings[ratings['product_id'].isin(product_counts[product_counts >= 5].index)]
+    return ratings
 
-print(f"Ratings shape: {ratings_df.shape}")
-print(f"Products shape: {products_df.shape}")
+def clean_products(products):
+    products = products.dropna(subset=['asin', 'title'])
+    products['description'] = products['description'].fillna('')
+    products['brand'] = products['brand'].fillna('Unknown')
+    products['price'] = products['price'].fillna(0)
+    return products
 
-# ==================== 2. FILTER COLD START ====================
-# Users with <5 ratings, products with <5 ratings are considered cold start
-#Counting, number of ratings per user and per product
-user_counts = ratings_df['user_id'].value_counts()
-product_counts = ratings_df['product_id'].value_counts()
+def encode_ids(ratings):
+    user2id = {uid: idx for idx, uid in enumerate(ratings['user_id'].unique())}
+    product2id = {pid: idx for idx, pid in enumerate(ratings['product_id'].unique())}
+    ratings['user_idx'] = ratings['user_id'].map(user2id)
+    ratings['product_idx'] = ratings['product_id'].map(product2id)
+    return ratings, user2id, product2id
 
-ratings_df = ratings_df[ratings_df['user_id'].isin(user_counts[user_counts >= 5].index)]
-ratings_df = ratings_df[ratings_df['product_id'].isin(product_counts[product_counts >= 5].index)]
+def build_sparse_matrix(ratings):
+    matrix = csr_matrix((ratings['rating'], (ratings['user_idx'], ratings['product_idx'])))
+    return matrix
 
-print(f"After filtering cold start users/products:")
-print(f"Ratings shape: {ratings_df.shape}")
+def main():
+    os.makedirs("data/processed", exist_ok=True)
+    ratings, products = load_raw_data()
+    ratings = filter_cold_start(ratings)
+    products = clean_products(products)
+    ratings, user2id, product2id = encode_ids(ratings)
 
-# ==================== 3. HANDLE MISSING VALUES ====================
-# For simplicity, drop products with missing essential info
-products_df = products_df.dropna(subset=['asin', 'title'])
-products_df['description'] = products_df['description'].fillna('')
-products_df['brand'] = products_df['brand'].fillna('Unknown')
-products_df['price'] = products_df['price'].fillna(0)
+    train = ratings.sample(frac=0.8, random_state=42)
+    test = ratings.drop(train.index)
 
-print("Missing values handled in product metadata.")
+    train_matrix = build_sparse_matrix(train)
+    test_matrix = build_sparse_matrix(test)
 
-# ==================== 4. ENCODE USERS AND PRODUCTS ====================
-# Map IDs to integer indices for matrix factorization
-user2id = {uid: idx for idx, uid in enumerate(ratings_df['user_id'].unique())}
-product2id = {pid: idx for idx, pid in enumerate(ratings_df['product_id'].unique())}
+    save_npz("data/processed/train_matrix.npz", train_matrix)
+    save_npz("data/processed/test_matrix.npz", test_matrix)
 
-ratings_df['user_idx'] = ratings_df['user_id'].map(user2id)
-ratings_df['product_idx'] = ratings_df['product_id'].map(product2id)
+    ratings.to_csv("data/processed/ratings_processed.csv", index=False)
+    products.to_csv("data/processed/products_processed.csv", index=False)
 
-print("User and product IDs encoded for ML models.")
+    with open("data/processed/user2id.json", "w") as f:
+        json.dump(user2id, f)
+    with open("data/processed/product2id.json", "w") as f:
+        json.dump(product2id, f)
 
-# ==================== 5. SAVE PROCESSED DATA ====================
-os.makedirs('data/processed', exist_ok=True)
+    print("Phase 2 Complete: Data preprocessing done.")
 
-ratings_df.to_csv('data/processed/ratings_processed.csv', index=False)
-products_df.to_csv('data/processed/products_processed.csv', index=False)
-
-# Save encoders
-with open('data/processed/user2id.json', 'w') as f:
-    json.dump(user2id, f)
-
-with open('data/processed/product2id.json', 'w') as f:
-    json.dump(product2id, f)
-
-print("Processed datasets and encoders saved in 'data/processed/'")
-print("="*60)
-print("🎯 PHASE 2 COMPLETE: Data Preprocessing Done")
-print("="*60)
+if __name__ == "__main__":
+    main()
